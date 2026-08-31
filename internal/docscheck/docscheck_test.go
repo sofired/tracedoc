@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 )
 
 // The fixture repository is a miniature of this one: the same file
@@ -942,4 +943,236 @@ func TestDocumentFilesSkipsFixturesAndToolDirectories(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("document set is empty")
 	}
+}
+
+// TestCodeSpanScanIsBounded is the regression test for the cost curve that
+// motivated maxCodeSpanScanBytes. A paragraph of backtick runs that never
+// close makes each run search everything after it, so the work grows with
+// the cube of the run count.
+//
+// A wall-clock assertion is ordinarily a poor shape for a test, and is
+// used here because the defect was a growth rate rather than a wrong
+// answer. The size was chosen by measuring both regimes rather than
+// guessing: at 3000 runs the unbounded scan takes 4.4 s, which a five
+// second ceiling does not reliably separate from anything — an earlier
+// version of this test passed with the bound removed. At 6000 runs the
+// same input costs 61 ms bounded and 35 s unbounded, so the ceiling below
+// sits eighty times above the passing time and seven times beneath the
+// failing one.
+//
+// Scanning starts at each run rather than at each backtick, which is how
+// readCodeSpan actually calls it.
+func TestCodeSpanScanIsBounded(t *testing.T) {
+	var builder strings.Builder
+	for run := 1; run <= 6000; run++ {
+		builder.WriteString(strings.Repeat("`", run))
+		builder.WriteString("x")
+	}
+	line := builder.String()
+	lines := []string{line}
+
+	start := time.Now()
+	for index := 0; index < len(line); {
+		if line[index] != '`' {
+			index++
+			continue
+		}
+		codeSpanEnd(lines, 0, index)
+		index += leadingRun(line[index:], '`')
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("scanning %d bytes of unclosed runs took %v", len(line), elapsed)
+	}
+}
+
+// TestCodeSpanScanBoundsOversizedCandidateRun covers the way a single run
+// used to escape maxCodeSpanScanBytes. The budget was spent per byte
+// stepped over, but the candidate run a scan landed on was measured whole
+// before that accounting ran, so one enormous run cost its full length no
+// matter how little budget was left.
+//
+// Runs of strictly increasing length never match each other, so every run
+// in the prefix below travels the whole way to the oversized run and pays
+// for it again. The prefix is sized to sit just under the budget, which
+// is what keeps all of it in play: 125 runs reach the 64 MiB run, and the
+// unbounded measurement reads it 125 times.
+//
+// The wall-clock assertion carries the same caveat as
+// TestCodeSpanScanIsBounded, and the same measurement behind it. Bounded,
+// this input takes 79 ms — one unavoidable pass, made when splitCodeSpans
+// reaches the oversized run and measures it as an opening run of its own.
+// Unbounded it takes 4.5 s, so the ceiling below sits twelve times above
+// the passing time and four times beneath the failing one. The race
+// detector does not move the passing time, which is a single tight loop
+// over bytes nothing else touches.
+func TestCodeSpanScanBoundsOversizedCandidateRun(t *testing.T) {
+	var builder strings.Builder
+	for run := 1; run <= 125; run++ {
+		builder.WriteString(strings.Repeat("`", run))
+		builder.WriteString("x")
+	}
+	if builder.Len() >= maxCodeSpanScanBytes {
+		t.Fatalf("prefix of %d bytes must stay under the %d byte budget",
+			builder.Len(), maxCodeSpanScanBytes)
+	}
+	builder.WriteString(strings.Repeat("`", 1<<26))
+	line := builder.String()
+	lines := []string{line}
+
+	start := time.Now()
+	for index := 0; index < len(line); {
+		if line[index] != '`' {
+			index++
+			continue
+		}
+		codeSpanEnd(lines, 0, index)
+		index += leadingRun(line[index:], '`')
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("scanning %d bytes ending in an oversized run took %v", len(line), elapsed)
+	}
+}
+
+// TestCodeSpanRunLengthsMustMatchExactly pins the distinction the bounded
+// measurement has to preserve. Measuring a candidate run only far enough
+// to tell it from an exact match means the closing rule is enforced by a
+// length limit rather than by a full count, so a run one backtick too
+// long has to stay a non-match.
+//
+// The last three cases guard the trap that shape sets. A measurement that
+// stops at the limit stops inside the run, and a search that resumed
+// there would read the remainder as a run of its own: a run of five
+// backticks would close a two-backtick opening on its last two, silently
+// pulling whatever lay between into a code span and out of the checks.
+func TestCodeSpanRunLengthsMustMatchExactly(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		close bool
+	}{
+		{"equal runs close", "``x``", true},
+		{"longer candidate does not close", "``x```", false},
+		{"shorter candidate does not close", "``x`", false},
+		{"longer candidate before an equal one", "`x``x`", true},
+		{"run far longer than the opening", "``x`````", false},
+		{"run three times the opening", "`x```", false},
+		{"remainder of a long run is not a new run", "```x```````", false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, ok := codeSpanEnd([]string{test.line}, 0, 0)
+			if ok != test.close {
+				t.Fatalf("codeSpanEnd(%q) closed = %v, want %v", test.line, ok, test.close)
+			}
+		})
+	}
+}
+
+// TestCodeSpanClosesOnTheLastOfTheBudget pins the other edge of the
+// bounded measurement. A closing run that lands exactly where the budget
+// runs out is still a closing run, so the measurement reads one backtick
+// past the opening length even when the budget cannot cover it: a
+// candidate capped at the budget would be indistinguishable from a longer
+// run, and calling that unmatched would turn a legitimate span into
+// literal text a few bytes short of the documented ceiling.
+//
+// The second case is why the first cannot simply be waved through. At the
+// same offset, a run longer than the opening must still fail to close.
+func TestCodeSpanClosesOnTheLastOfTheBudget(t *testing.T) {
+	const opening = 3
+	filler := strings.Repeat("x", maxCodeSpanScanBytes-opening)
+	run := strings.Repeat("`", opening)
+
+	t.Run("an exact run on the last of the budget closes", func(t *testing.T) {
+		line := run + filler + run
+		if _, _, ok := codeSpanEnd([]string{line}, 0, 0); !ok {
+			t.Fatal("a closing run reached within the budget must still close")
+		}
+	})
+
+	t.Run("a longer run on the last of the budget does not", func(t *testing.T) {
+		line := run + filler + run + "``"
+		if _, _, ok := codeSpanEnd([]string{line}, 0, 0); ok {
+			t.Fatal("a run longer than the opening must never close it")
+		}
+	})
+}
+
+// TestCodeSpanDelimitersObeyTheBound pins the ceiling against the runs
+// themselves rather than against the distance between them. Two runs of
+// equal length with a byte between them close a span whatever their
+// length, so measuring the opening run without a ceiling would let a pair
+// of 8 KiB delimiters inspect 16 KiB -- a span the bound is meant to have
+// given up on. The opening run is measured under the ceiling too, and one
+// past it is literal text.
+func TestCodeSpanDelimitersObeyTheBound(t *testing.T) {
+	closes := func(length int) bool {
+		run := strings.Repeat("`", length)
+		_, _, ok := codeSpanEnd([]string{run + "x" + run}, 0, 0)
+		return ok
+	}
+	if !closes(maxCodeSpanScanBytes) {
+		t.Error("delimiters at the ceiling must still close")
+	}
+	if closes(maxCodeSpanScanBytes + 1) {
+		t.Error("delimiters past the ceiling must be literal text")
+	}
+
+	// The worst case the const comment names: delimiters at the ceiling
+	// with the search between them running its full length, so the call
+	// reads three times the ceiling. It closes, which is what makes the
+	// figure reachable rather than hypothetical.
+	widest := strings.Repeat("`", maxCodeSpanScanBytes)
+	line := widest + strings.Repeat("x", maxCodeSpanScanBytes-1) + widest
+	if _, _, ok := codeSpanEnd([]string{line}, 0, 0); !ok {
+		t.Error("delimiters at the ceiling a full search apart must close")
+	}
+}
+
+// TestCodeSpanClosesOnALaterLine covers the multi-line path through the
+// same measurement. A span whose closing run sits on a later line is the
+// case codeSpanEnd exists for -- a quoted "<!--" inside one would open a
+// comment that swallowed the rest of the document if the span were missed
+// -- and the run lengths have to match across the line break exactly as
+// they do within a line.
+func TestCodeSpanClosesOnALaterLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		close bool
+	}{
+		{"equal runs close across lines", []string{"``x", "x``"}, true},
+		{"longer run on the later line does not", []string{"``x", "x```"}, false},
+		{"shorter run on the later line does not", []string{"``x", "x`"}, false},
+		{"a blank line ends the paragraph first", []string{"``x", "", "x``"}, false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, ok := codeSpanEnd(test.lines, 0, 0)
+			if ok != test.close {
+				t.Fatalf("codeSpanEnd(%q) closed = %v, want %v", test.lines, ok, test.close)
+			}
+		})
+	}
+}
+
+// TestCodeSpanBoundLeavesRealSpansIntact is the other half: the ceiling
+// must be unreachable by anything a document would legitimately contain.
+// A span just under the bound still closes; one past it is left as literal
+// text, which is exactly what an unmatched run already becomes.
+func TestCodeSpanBoundLeavesRealSpansIntact(t *testing.T) {
+	t.Run("span just inside the bound closes", func(t *testing.T) {
+		line := "`" + strings.Repeat("x", maxCodeSpanScanBytes-16) + "`"
+		if _, _, ok := codeSpanEnd([]string{line}, 0, 0); !ok {
+			t.Fatal("a span within the bound must still close")
+		}
+	})
+
+	t.Run("span past the bound is literal text", func(t *testing.T) {
+		line := "`" + strings.Repeat("x", maxCodeSpanScanBytes+16) + "`"
+		if _, _, ok := codeSpanEnd([]string{line}, 0, 0); ok {
+			t.Fatal("a span past the bound must be left unclosed")
+		}
+	})
+
 }

@@ -32,12 +32,14 @@
 //     live Markdown. A repository path or a link quoted inside such a
 //     span is therefore never checked. No multi-line span appears in
 //     this repository's documentation today.
-//   - A backtick run that never closes is scanned to the end of its
-//     paragraph, so a paragraph built entirely of such runs costs more
-//     than linear time. Checking this repository's real tree takes a few
-//     tens of milliseconds, and the growth starts to matter only for a
-//     crafted document orders of magnitude larger than the tree itself.
-//     Bounding the scan is tracked separately.
+//   - A backtick run longer than maxCodeSpanScanBytes, or whose search
+//     for its closing run runs that far, is left as literal text. That is
+//     what an unmatched run already becomes, so the ceiling changes no
+//     behavior a real document can observe: it takes a span longer than
+//     the bound to reach one, and the longest in this repository is two
+//     orders of magnitude below it. Without the ceiling, a paragraph
+//     built entirely of never-closing runs costs superlinear time,
+//     because each run rescans the rest of the paragraph.
 //   - Indented (non-fenced) code blocks are not treated as examples. Every
 //     example here uses a fence.
 //   - The checks trust the working tree's file identity, not only its path
@@ -74,6 +76,34 @@ const (
 	ciWorkflowFile      = ".github/workflows/ci.yml"
 	releaseWorkflowFile = ".github/workflows/release.yml"
 )
+
+// maxCodeSpanScanBytes bounds both how long a backtick run may be and how
+// far it may search for the run that closes it. Beyond the bound the run
+// is left as literal text — the same outcome an unmatched run already
+// produces, so nothing a real document can express changes: reaching the
+// ceiling needs a single code span longer than 8 KiB, where the longest
+// in this repository is under a hundred bytes.
+//
+// The bound is a ceiling on each of the three reads one call makes rather
+// than on their sum: the opening run, the search for a closing one, and
+// the measurement of the candidate that ends that search. A call reads
+// three times the ceiling in the worst case — delimiters at the ceiling
+// with the search between them running its full length — which is a
+// constant, not the unbounded quantity the ceiling was added to remove.
+//
+// That last measurement is not charged before it is accepted, because a
+// closing run can only be told from a longer one by reading one byte past
+// the opening's length. Refusing to spend a byte the budget no longer
+// covers would leave the two indistinguishable, and would turn a closing
+// run landing on the last of the budget into literal text.
+//
+// The ceiling exists because the search is per run: a paragraph of runs
+// that never close makes each one rescan everything after it. Measured
+// before the bound, a paragraph of runs of increasing length cost 163 ms
+// at 20 KB, 1.8 s at 81 KB, and 26.7 s at 321 KB — a shape that would
+// spend a CI job's whole budget inside one paragraph and surface as a
+// timeout rather than as a named failure.
+const maxCodeSpanScanBytes = 8 << 10
 
 // selfCheckStep is the workflow step whose command list AGENTS.md declares
 // authoritative.
@@ -797,8 +827,18 @@ func codeSpanEnd(lines []string, index, position int) (endIndex, endPosition int
 	if position >= len(lines[index]) || lines[index][position] != '`' {
 		return 0, 0, false
 	}
-	opening := leadingRun(lines[index][position:], '`')
+	// The opening run is measured under the same ceiling as the search
+	// that follows it, and a run past the ceiling is left as literal
+	// text. Without that, a pair of oversized delimiters would close a
+	// span the ceiling is meant to have given up on -- two runs of 8 KiB
+	// and one byte between them inspect 16 KiB -- and every measurement
+	// below would be free to read a run that long.
+	opening := leadingRunAtMost(lines[index][position:], '`', maxCodeSpanScanBytes+1)
+	if opening > maxCodeSpanScanBytes {
+		return 0, 0, false
+	}
 	scan := position + opening
+	budget := maxCodeSpanScanBytes
 	for cursor := index; cursor < len(lines); cursor++ {
 		if cursor > index {
 			if strings.TrimSpace(lines[cursor]) == "" {
@@ -808,15 +848,44 @@ func codeSpanEnd(lines []string, index, position int) (endIndex, endPosition int
 		}
 		line := lines[cursor]
 		for scan < len(line) {
+			if budget <= 0 {
+				return 0, 0, false
+			}
 			if line[scan] != '`' {
 				scan++
+				budget--
 				continue
 			}
-			run := leadingRun(line[scan:], '`')
+			// Measuring only far enough to tell an exact match from a
+			// longer run is what keeps one oversized run inside the
+			// budget: reading the run whole would spend its full length
+			// before the check above ever saw the cost, and every run
+			// that precedes it repeats that read.
+			//
+			// The limit is not clamped to the remaining budget. Doing so
+			// would leave a run of exactly opening backticks
+			// indistinguishable from a longer one, and resolving that
+			// ambiguity as a non-match turns a closing run landing on
+			// the last of the budget into literal text. Reading one past
+			// opening costs at most the opening run's own length, once
+			// per call, against a budget the next iteration is about to
+			// find spent.
+			run := leadingRunAtMost(line[scan:], '`', opening+1)
 			if run == opening {
 				return cursor, scan + opening, true
 			}
 			scan += run
+			budget -= run
+			// A measurement that stopped at the limit may have stopped
+			// inside the run rather than at its end, so the remainder is
+			// stepped over here. Resuming the search at that offset
+			// instead would read what is left as a run of its own and
+			// could take its tail for the closing one: ``x````` would
+			// close on the last two backticks of a run of five.
+			for budget > 0 && scan < len(line) && line[scan] == '`' {
+				scan++
+				budget--
+			}
 		}
 	}
 	return 0, 0, false
@@ -824,8 +893,18 @@ func codeSpanEnd(lines []string, index, position int) (endIndex, endPosition int
 
 // leadingRun counts the leading repetitions of char in value.
 func leadingRun(value string, char byte) int {
+	return leadingRunAtMost(value, char, len(value))
+}
+
+// leadingRunAtMost counts the leading repetitions of char in value,
+// stopping once it has counted limit of them. A caller that only needs to
+// tell one exact length from every greater one then pays for the length
+// it asked about rather than for the run it was handed, but it gets back
+// a count that may sit inside a run rather than at its end, and has to
+// step over the remainder itself.
+func leadingRunAtMost(value string, char byte, limit int) int {
 	run := 0
-	for run < len(value) && value[run] == char {
+	for run < limit && run < len(value) && value[run] == char {
 		run++
 	}
 	return run
