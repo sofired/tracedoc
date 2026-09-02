@@ -822,7 +822,10 @@ func codeSpanAt(line string, index int) int {
 // closing backticks are on a later line is still code, and reading it as
 // prose would open a comment that swallowed every link and heading up to
 // the next -->. A blank line ends the paragraph, and with it any span
-// still open.
+// codeSpanEnd finds the closing backtick delimiter for a code span beginning at
+// the specified position. It returns the closing delimiter's location and true,
+// or zero values and false when no valid closing delimiter is found within the
+// scan limit.
 func codeSpanEnd(lines []string, index, position int) (endIndex, endPosition int, ok bool) {
 	if position >= len(lines[index]) || lines[index][position] != '`' {
 		return 0, 0, false
@@ -901,7 +904,7 @@ func leadingRun(value string, char byte) int {
 // tell one exact length from every greater one then pays for the length
 // it asked about rather than for the run it was handed, but it gets back
 // a count that may sit inside a run rather than at its end, and has to
-// step over the remainder itself.
+// leadingRunAtMost counts consecutive leading occurrences of char, up to limit.
 func leadingRunAtMost(value string, char byte, limit int) int {
 	run := 0
 	for run < limit && run < len(value) && value[run] == char {
