@@ -173,7 +173,7 @@ func CheckLinks(fsys fs.FS, files []string) check.Errors {
 					if errors.Is(err, fs.ErrNotExist) {
 						checker.Addf(location, "link %q points at a file that does not exist", ref.target)
 					} else {
-						checker.Addf(location, "link %q: %v", ref.target, err)
+						checker.Addf(location, "link %q targets %s, which cannot be examined: %v", ref.target, resolved, err)
 					}
 					continue
 				}
