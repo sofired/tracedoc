@@ -143,6 +143,34 @@ func unreadable(dir string) unreadableRepository {
 	return unreadableRepository{MapFS: repository(nil), dir: dir}
 }
 
+// unstatableRepository is the fixture repository with one path whose Stat
+// fails. CheckLinks's fs.Stat branch is what needs this: a path that exists
+// in the tree but cannot be examined is not something MapFS can express,
+// and intercepting ReadDir would never reach it.
+//
+// Only Stat is intercepted — the method that branch actually calls. Open
+// and ReadFile stay on the embedded fixture, so a later readDocument of
+// the same path would still succeed; that separation keeps this fixture
+// aimed at the Stat message, not the "cannot be read" one beside it.
+type unstatableRepository struct {
+	fstest.MapFS
+
+	// name is the path whose Stat fails.
+	name string
+}
+
+func (r unstatableRepository) Stat(name string) (fs.FileInfo, error) {
+	if name == r.name {
+		return nil, errUnreadable
+	}
+	return fs.Stat(r.MapFS, name)
+}
+
+// unstatable builds the fixture repository with name un-Stat-able.
+func unstatable(name string) unstatableRepository {
+	return unstatableRepository{MapFS: repository(nil), name: name}
+}
+
 // checkAll runs every check over the fixture repository with overrides
 // applied.
 func checkAll(t *testing.T, overrides map[string]string) []string {
@@ -373,7 +401,20 @@ func TestCheckLinks(t *testing.T) {
 		errs := checkAll(t, map[string]string{
 			"README.md": "# tracedoc\n\nSee [the guide](docs/guide.md).\n",
 		})
-		requireReport(t, errs, "README.md:3", "docs/guide.md", "does not exist")
+		requireOnlyReport(t, errs, "README.md:3", "docs/guide.md", "points at a file that does not exist")
+	})
+
+	t.Run("an unreadable link target reports the underlying error", func(t *testing.T) {
+		// The clean fixture README links to docs/cli.md, which exists.
+		// Stat alone fails; the finding must carry errUnreadable rather
+		// than the missing-file message that used to hide every Stat error.
+		errs := CheckLinks(unstatable("docs/cli.md"), []string{"README.md"})
+		requireOnlyReport(t, errs, "README.md:3", "docs/cli.md", errUnreadable.Error())
+		for _, err := range errs {
+			if strings.Contains(err, "does not exist") {
+				t.Fatalf("unreadable target reported as missing: %v", errs)
+			}
+		}
 	})
 
 	t.Run("same-file anchor is resolved against the document itself", func(t *testing.T) {

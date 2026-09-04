@@ -49,6 +49,7 @@
 package docscheck
 
 import (
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -169,7 +170,11 @@ func CheckLinks(fsys fs.FS, files []string) check.Errors {
 					continue
 				}
 				if _, err := fs.Stat(fsys, resolved); err != nil {
-					checker.Addf(location, "link %q points at a file that does not exist", ref.target)
+					if errors.Is(err, fs.ErrNotExist) {
+						checker.Addf(location, "link %q points at a file that does not exist", ref.target)
+					} else {
+						checker.Addf(location, "link %q: %v", ref.target, err)
+					}
 					continue
 				}
 			}
