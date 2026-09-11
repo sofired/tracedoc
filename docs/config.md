@@ -211,6 +211,12 @@ Free-text document fields must always pass through the escaping functions
 (`htmlText`, `prose`, `table`, `linkLabel`, `inlineValues`,
 `linkDestination`, `inlineCode`, `anchor`); emitting document fields raw
 lets document authors inject Markdown or HTML into the rendered output.
+`TestRenderingEscapesUntrustedContent`, in both
+`internal/render/requirements/requirements_test.go` and
+`internal/render/threats/threats_test.go`, holds a hostile value in a
+sample of the default templates' free-text fields and asserts its escaped
+form, so a default template that drops the escaper on one of those fields
+fails.
 
 Anchors take two functions, one per context: `anchor` writes the `id`
 attribute and `anchorHref` writes a same-document `#` destination. Use them
@@ -220,8 +226,15 @@ unreserved set, which a browser decodes before matching it against the
 `id`. Swapping them silently breaks the link: an `id` is not percent-decoded,
 and a Markdown destination ends at the first `)` or space. Both matter only
 for `risks[].id`, the one consumer-patterned identifier — every other format
-is schema-owned and passes through both functions unchanged. Do not build an
-anchor out of `lower`: it does not escape.
+is schema-owned and passes through both functions unchanged apart from the
+case-fold. Do not build an anchor out of `lower`: it does not escape.
+`TestAnchorPairAgrees` in `internal/render/render_test.go` pins the
+agreement for identifiers that would end either context;
+`TestAnchorHrefLeavesSchemaOwnedIDsIntact` beside it pins that `anchorHref`
+leaves a schema-owned identifier unencoded, and
+`TestEveryDeclaredEntityIsAnchored` in
+`internal/render/threats/threats_test.go` pins the case-folded `id` that
+`anchor` writes for each one.
 
 A value may be emitted bare **only** when its character set is fixed by
 something the document author cannot change. That covers stable ID fields
@@ -237,7 +250,9 @@ It does **not** cover a value shaped by a consumer-supplied pattern.
 `risk_pattern` is checked only for anchoring and length, so a risk ID can
 legitimately contain backticks, pipes, or brackets; the default template
 therefore routes `risks[].id` through `inlineCode` like any other free-form
-value, and through `anchor` or `anchorHref` where it becomes an anchor.
+value, and through `anchor` or `anchorHref` where it becomes an anchor;
+`TestRiskIDsAreEscaped` and `TestRiskIDAnchorsAreEscaped` in
+`internal/render/threats/threats_test.go` pin the two routes.
 Treat every consumer-patterned field this way: the pattern is policy, not a
 character-set guarantee. Anything else emitted raw is an injection risk. Section
 layout and precomputed-section membership may change in minor releases;
