@@ -39,8 +39,10 @@ codebase.
   path named in prose that does not exist, on a changelog section with no
   correctly dated entry for the released version, and on self-check command
   lists that have drifted apart. See [Documentation checks](#documentation-checks).
-  Behavioural claims in the contract documents cite the test that pins
-  them; see [Claims cite their tests](#claims-cite-their-tests).
+  As a convention rather than a check, behavioral claims in the contract
+  documents cite the test that pins them; see
+  [Claims cite their tests](#claims-cite-their-tests). Tests themselves
+  follow [Test conventions](#test-conventions).
 
 ## Validation
 
@@ -103,13 +105,14 @@ section describes.
 
 ### Claims cite their tests
 
-Every behavioural claim in a versioned contract document —
+Every behavioral claim in a versioned contract document —
 `docs/schema.md`, `docs/schema-requirements.md`,
 `docs/schema-threat-model.md`, `docs/config.md`, and `docs/cli.md` —
 cites the test that pins it, the way `CHANGELOG.md` already cites issue
 numbers. A citation is the test's name in backticks and the file that
 holds it, written into the paragraph or list item that makes the claim,
-so a reader who finds the claim finds the test without leaving the page:
+so a reader who finds the claim finds the test without leaving the page.
+`docs/schema-threat-model.md` reads:
 
 > The rendered companion anchors every declared record in one namespace,
 > so a reused identifier would silently collapse two anchors into one.
@@ -117,7 +120,9 @@ so a reader who finds the claim finds the test without leaving the page:
 > `internal/render/threats/threats_test.go` pins the anchoring.
 
 A test *pins* a claim when the change that makes the claim false makes
-the test fail. `TestEveryDeclaredEntityIsAnchored` enumerates the
+that test fail — shown the same way an error-branch test is validated
+below, by making the change and watching the test go red.
+`TestEveryDeclaredEntityIsAnchored` enumerates the
 fixture's own collections and asserts an anchor for each identifier, so
 a collection added to the schema without an anchor fails the test the
 day the fixture declares one. The claim it pins was stated in
@@ -129,13 +134,20 @@ reason to check, and a link checker would have passed all four; a
 reviewer reading the template is what caught it. The citation is what
 makes that reading repeatable.
 
+The claims that motivated the convention carry citations today: anchoring
+and identifier uniqueness in `docs/schema-threat-model.md`, invisible code
+points in `docs/schema.md`, and the escaping rules in `docs/config.md`.
+The rest of those documents, `docs/cli.md`, and
+`docs/schema-requirements.md` are not yet converted; issue #28 tracks the
+conversion, and issue #29 the claims found to have no pinning test.
+
 - Cite only a test that fails when the claim stops being true. A test
   that exercises the code path without asserting the claimed property is
   not a citation. When no test pins a claim, leave it uncited and treat
   the gap as the finding: write the test, or open an issue for it.
   Citing the nearest test is worse than citing none, because it converts
   a visible gap into a false assurance.
-- A document with no behavioural claims carries no citations. Naming a
+- A document with no behavioral claims carries no citations. Naming a
   field, listing a vocabulary, or defining a format is a definition, not
   a claim that can drift from the code, and inventing a citation for one
   adds noise without protection.
@@ -151,9 +163,9 @@ makes that reading repeatable.
 
 ### Test conventions
 
-Two conventions the filesystem-error tests in `internal/docscheck`
-established. Both apply to every test in this repository, and neither
-is enforced by a check.
+Two conventions come from the filesystem-error tests in
+`internal/docscheck`. Both apply to every test in this repository, and
+neither is enforced by a check.
 
 - **A test `fs.FS` wrapper intercepts only the method the target branch
   calls.** `unreadableRepository` in `internal/docscheck/docscheck_test.go`

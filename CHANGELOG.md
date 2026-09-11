@@ -8,7 +8,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The contract documents cite the tests that pin their behavioural
+- The contract documents cite the tests that pin their behavioral
   claims: the anchoring and identifier-uniqueness rules in
   `docs/schema-threat-model.md`, the invisible-code-point guarantees in
   `docs/schema.md`, and the escaping rules in `docs/config.md` each name
