@@ -138,8 +138,10 @@ The claims that motivated the convention carry citations today: anchoring
 and identifier uniqueness in `docs/schema-threat-model.md`, invisible code
 points in `docs/schema.md`, and the escaping rules in `docs/config.md`.
 The rest of those documents, `docs/cli.md`, and
-`docs/schema-requirements.md` are not yet converted; issue #28 tracks the
-conversion, and issue #29 the claims found to have no pinning test.
+`docs/schema-requirements.md` are not yet converted;
+[#28](https://github.com/sofired/tracedoc/issues/28) tracks the conversion,
+and [#29](https://github.com/sofired/tracedoc/issues/29) the claims found to
+have no pinning test.
 
 - Cite only a test that fails when the claim stops being true. A test
   that exercises the code path without asserting the claimed property is
