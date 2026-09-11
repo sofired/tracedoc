@@ -166,7 +166,7 @@ func (r unstatableRepository) Stat(name string) (fs.FileInfo, error) {
 	return fs.Stat(r.MapFS, name)
 }
 
-// unstatable builds the fixture repository with name un-Stat-able.
+// unstatable builds the fixture repository with name's Stat call failing.
 func unstatable(name string) unstatableRepository {
 	return unstatableRepository{MapFS: repository(nil), name: name}
 }
@@ -404,7 +404,7 @@ func TestCheckLinks(t *testing.T) {
 		requireOnlyReport(t, errs, "README.md:3", "docs/guide.md", "points at a file that does not exist")
 	})
 
-	t.Run("an unreadable link target reports the underlying error", func(t *testing.T) {
+	t.Run("an unstatable link target reports the underlying error", func(t *testing.T) {
 		// The clean fixture README links to docs/cli.md, which exists.
 		// Stat alone fails; the finding must carry errUnreadable rather
 		// than the missing-file message that used to hide every Stat error.
@@ -412,7 +412,7 @@ func TestCheckLinks(t *testing.T) {
 		requireOnlyReport(t, errs, "README.md:3", "docs/cli.md", errUnreadable.Error())
 		for _, err := range errs {
 			if strings.Contains(err, "does not exist") {
-				t.Fatalf("unreadable target reported as missing: %v", errs)
+				t.Fatalf("unstatable target reported as missing: %v", errs)
 			}
 		}
 	})
