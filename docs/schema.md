@@ -42,13 +42,17 @@ how output is interpreted or displayed:
   includes NEL) and the line and paragraph separators (Zl/Zp) in every
   validated string — scalar fields and every free-form list item alike.
   The diagnostic reads `contains a control or line-separator character`.
+  `TestControlFreeString` and `TestStringListRejectsControlBearingItems`
+  in `internal/check/check_test.go` pin the rejection and its diagnostic
+  for a scalar and for a list item.
 - **Rendering** additionally neutralizes those code points *and* the
   bidirectional embedding, override, and isolate controls
   (U+202A–U+202E, U+2066–U+2069) in every emission context: prose, table
   cells, inline code, link labels, HTML text, and link destinations
   (percent-encoded there rather than dropped). This is defense in depth
   for the validated classes and the primary defense for bidirectional
-  controls.
+  controls. `TestEscapersNeutralizeInvisibleRunes` in
+  `internal/render/render_test.go` pins this for each of those contexts.
 
 Bidirectional controls are deliberately **not** rejected at validation:
 right-to-left content is legitimate in prose, so the boundary is drawn at

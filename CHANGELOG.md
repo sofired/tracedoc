@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The contract documents cite the tests that pin their behavioural
+  claims: the anchoring and identifier-uniqueness rules in
+  `docs/schema-threat-model.md`, the invisible-code-point guarantees in
+  `docs/schema.md`, and the escaping rules in `docs/config.md` each name
+  the test that fails when the claim stops being true. `AGENTS.md` states
+  the convention, with the anchoring claim as its worked example, and
+  records the two test conventions the filesystem-error tests in
+  `internal/docscheck` established
+  ([#16](https://github.com/sofired/tracedoc/issues/16)).
 - Requirements-matrix documentation gains `Traceability`, `Ownership`, and
   `Evidence` sections, so the two schema documents read as siblings rather
   than one carrying its rules inline in table cells. States plainly that
