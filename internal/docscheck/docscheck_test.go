@@ -171,6 +171,37 @@ func unstatable(name string) unstatableRepository {
 	return unstatableRepository{MapFS: repository(nil), name: name}
 }
 
+// unreadableFileRepository is the fixture repository with one file whose
+// ReadFile fails. readDocument's fs.ReadFile branches are what need this: a
+// file that exists in the tree but cannot be read is not something MapFS
+// can express, and intercepting Open would never reach it — fstest.MapFS
+// promotes its own ReadFile method, which satisfies fs.ReadFileFS and lets
+// fs.ReadFile dispatch straight to the embedded MapFS's unwrapped Open, so
+// an Open-only override would silently fail to intercept anything.
+//
+// Only ReadFile is intercepted — the method readDocument actually calls.
+// Stat and ReadDir stay on the embedded fixture, so a file whose ReadFile
+// fails can still be found to exist by a preceding fs.Stat check.
+type unreadableFileRepository struct {
+	fstest.MapFS
+
+	// name is the path whose ReadFile fails.
+	name string
+}
+
+func (r unreadableFileRepository) ReadFile(name string) ([]byte, error) {
+	if name == r.name {
+		return nil, errUnreadable
+	}
+	return fs.ReadFile(r.MapFS, name)
+}
+
+// unreadableFile builds the fixture repository with name's ReadFile call
+// failing.
+func unreadableFile(name string) unreadableFileRepository {
+	return unreadableFileRepository{MapFS: repository(nil), name: name}
+}
+
 // checkAll runs every check over the fixture repository with overrides
 // applied.
 func checkAll(t *testing.T, overrides map[string]string) []string {
@@ -417,6 +448,32 @@ func TestCheckLinks(t *testing.T) {
 		}
 	})
 
+	t.Run("a document in the checked set that cannot be read is reported", func(t *testing.T) {
+		// removed (used elsewhere to delete a fixture file outright) cannot
+		// reach this branch: a missing file is cleanly absent and never
+		// reaches readDocument's fs.ReadFile call. This needs a file that is
+		// present but fails to read, which only a ReadFile-intercepting
+		// fs.FS can manufacture.
+		errs := CheckLinks(unreadableFile("README.md"), []string{"README.md"})
+		requireOnlyReport(t, errs, "README.md", "read:", errUnreadable.Error())
+	})
+
+	t.Run("a link target that exists but cannot be read is reported", func(t *testing.T) {
+		// This is a second, separate readDocument call from the one above:
+		// resolving the link's fragment against its target document, once
+		// the target has already been found to exist. The target must be a
+		// different file than the one failing in the previous subtest, and
+		// its own Stat must still succeed, so this fixture overrides README
+		// to add a fragment and fails docs/cli.md's ReadFile instead.
+		errs := CheckLinks(unreadableFileRepository{
+			MapFS: repository(map[string]string{
+				"README.md": "# tracedoc\n\nSee [cli](docs/cli.md#usage).\n",
+			}),
+			name: "docs/cli.md",
+		}, []string{"README.md"})
+		requireOnlyReport(t, errs, "README.md:3", "docs/cli.md", "cannot be read", errUnreadable.Error())
+	})
+
 	t.Run("same-file anchor is resolved against the document itself", func(t *testing.T) {
 		errs := checkAll(t, map[string]string{
 			"README.md": "# tracedoc\n\n## Usage\n\nSee [usage](#usage) and [none](#missing).\n",
@@ -485,6 +542,11 @@ func TestCheckNamedPaths(t *testing.T) {
 			"README.md": "# tracedoc\n\nSources live in `internal/docscheck/` and `cmd/tracedoc/main.go`.\n",
 		})
 		requireClean(t, errs)
+	})
+
+	t.Run("a document in the checked set that cannot be read is reported", func(t *testing.T) {
+		errs := CheckNamedPaths(unreadableFile("README.md"), []string{"README.md"})
+		requireOnlyReport(t, errs, "README.md", "read:", errUnreadable.Error())
 	})
 }
 
@@ -732,6 +794,13 @@ func TestCheckChangelog(t *testing.T) {
 		requireReport(t, errs, "CHANGELOG.md:5", "2026-13-02", "YYYY-MM-DD")
 	})
 
+	t.Run("a released-version section with an empty date is reported", func(t *testing.T) {
+		errs := checkAll(t, map[string]string{
+			"CHANGELOG.md": strings.Replace(fixtureChangelog, "## 0.1.0 - 2026-08-02", "## 0.1.0", 1),
+		})
+		requireReport(t, errs, "CHANGELOG.md:5", "released version 0.1.0", "carries no date", `"## 0.1.0 - YYYY-MM-DD"`)
+	})
+
 	t.Run("a duplicate section for the released version is reported", func(t *testing.T) {
 		errs := checkAll(t, map[string]string{
 			"CHANGELOG.md": fixtureChangelog + "\n## 0.1.0 - 2026-08-03\n",
@@ -751,6 +820,35 @@ func TestCheckChangelog(t *testing.T) {
 			"cmd/tracedoc/main.go": "package main\n\nfunc main() {}\n",
 		})
 		requireReport(t, errs, "declares no toolVersion constant")
+	})
+}
+
+// TestToolVersion covers toolVersion's own AST-walking branches directly,
+// rather than through CheckChangelog's report, because a name that is
+// merely skipped on the way to finding toolVersion produces no message of
+// its own to assert on — the observable effect is that the right version
+// is still found despite the noise.
+//
+// One AST shape in the same walk is deliberately not exercised here: the
+// "spec is not *ast.ValueSpec" branch that follows a const GenDecl's own
+// type check. go/parser only ever produces *ast.ValueSpec for a
+// token.CONST GenDecl's Specs — ImportSpec and TypeSpec belong to IMPORT
+// and TYPE decls respectively — and toolVersion returns immediately on any
+// parse.ParseFile error, before this loop runs, so a source string that
+// fails to parse never reaches it either. No fixture built from source text
+// can make that branch execute; see the PR for this test file for the
+// reviewer confirmation this reasoning was given.
+func TestToolVersion(t *testing.T) {
+	t.Run("a preceding constant with a different name is skipped", func(t *testing.T) {
+		version, err := toolVersion(repository(map[string]string{
+			"cmd/tracedoc/main.go": "package main\n\nconst (\n\tappName = \"tracedoc\"\n\ttoolVersion = \"0.1.0\"\n)\n",
+		}))
+		if err != nil {
+			t.Fatalf("toolVersion() error = %v, want nil", err)
+		}
+		if version != "0.1.0" {
+			t.Errorf("toolVersion() = %q, want %q", version, "0.1.0")
+		}
 	})
 }
 
@@ -949,6 +1047,28 @@ func TestHeadingAnchorsNumbersRepeatedSlugs(t *testing.T) {
 	}
 	if _, ok := anchors["references-3"]; ok {
 		t.Errorf("a heading inside a fenced block was counted: %v", anchors)
+	}
+}
+
+// TestHeadingAnchorsSkipsHeadingsThatSlugToEmpty covers a heading whose
+// text is entirely punctuation: headingSlug strips every character that is
+// not a letter, digit, hyphen, or underscore, so nothing survives. Such a
+// heading is recorded as no anchor at all, and must not advance the count
+// used to number a real repeat of an adjacent slug.
+func TestHeadingAnchorsSkipsHeadingsThatSlugToEmpty(t *testing.T) {
+	anchors := headingAnchors(blankFencedCode(
+		"# References\n\n## !!!\n\n## References\n",
+	))
+	if _, ok := anchors[""]; ok {
+		t.Errorf("a heading with no sluggable characters produced an anchor: %v", anchors)
+	}
+	for _, want := range []string{"references", "references-1"} {
+		if _, ok := anchors[want]; !ok {
+			t.Errorf("anchor %q missing from %v", want, anchors)
+		}
+	}
+	if _, ok := anchors["references-2"]; ok {
+		t.Errorf("the skipped heading advanced the repeat count: %v", anchors)
 	}
 }
 
